@@ -1,0 +1,107 @@
+name: Docker Build
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - develop
+    tags:
+      - '*'
+  pull_request:
+    branches:
+      - main
+      - master
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Checkout repository
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      # Set up Docker Buildx
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      # Cache dependencies
+      - name: Cache Docker layers
+        uses: actions/cache@v3
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-
+
+      # Login to Docker Hub (只在非PR时登录)
+      - name: Login to Docker Hub
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      # 设置镜像标签
+      - name: Set up Docker tags
+        id: docker_meta
+        uses: docker/metadata-action@v4
+        with:
+          images: hsxk/edinet-postgresql
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'main') || startsWith(github.ref, 'refs/tags/') }}
+
+      # 构建单平台镜像用于扫描（不推送）
+      - name: Build local image for scanning
+        uses: docker/build-push-action@v3
+        with:
+          context: .
+          file: Dockerfile
+          push: false
+          load: true
+          tags: edinet-api:scan-${{ github.sha }}
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
+
+      # 安全扫描本地镜像
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: edinet-postgresql:scan-${{ github.sha }}
+          format: 'table'
+          exit-code: '0'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
+
+      # 构建并推送多平台镜像（只在非PR时推送）
+      - name: Build and push multi-platform Docker image
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v3
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.docker_meta.outputs.tags }}
+          labels: ${{ steps.docker_meta.outputs.labels }}
+          cache-from: |
+            type=local,src=/tmp/.buildx-cache
+            type=registry,ref=hsxk/edinet-postgresql:cache-linux-amd64
+            type=registry,ref=hsxk/edinet-postgresql:cache-linux-arm64
+          cache-to: |
+            type=registry,ref=hsxk/edinet-postgresql:cache-linux-amd64,mode=max
+            type=registry,ref=hsxk/edinet-postgresql:cache-linux-arm64,mode=max
+
+      # 移动缓存
+      - name: Move cache
+        run: |
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
