@@ -1,5 +1,5 @@
 # 使用官方 PostgreSQL 镜像
-FROM postgres:17
+FROM postgres:18
 
 # 安装 PostGIS 和依赖包
 RUN apt-get update && \
