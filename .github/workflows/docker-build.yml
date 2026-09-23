@@ -2,106 +2,118 @@ name: Docker Build
 
 on:
   push:
-    branches:
-      - main
-      - master
-      - develop
-    tags:
-      - '*'
+    branches: [main]
+    tags: ['v*.*.*']
   pull_request:
-    branches:
-      - main
-      - master
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: edinet-postgresql-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  IMAGE: hsxk/edinet-postgresql
 
 jobs:
-  build:
+  validate:
     runs-on: ubuntu-latest
-
+    timeout-minutes: 30
     steps:
-      # Checkout repository
-      - name: Checkout repository
-        uses: actions/checkout@v3
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # Set up Docker Buildx
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      # Cache dependencies
-      - name: Cache Docker layers
-        uses: actions/cache@v3
+      - name: Build validation image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
-          path: /tmp/.buildx-cache
-          key: ${{ runner.os }}-buildx-${{ github.sha }}
-          restore-keys: |
-            ${{ runner.os }}-buildx-
+          context: .
+          file: Dockerfile
+          load: true
+          push: false
+          tags: edinet-postgresql:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-      # Login to Docker Hub (只在非PR时登录)
-      - name: Login to Docker Hub
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@v2
+      - name: Verify PostgreSQL, PostGIS and pg_trgm
+        shell: bash
+        run: |
+          set -euo pipefail
+          cid=$(docker run -d --rm             -e POSTGRES_PASSWORD=test-password             -e POSTGRES_DB=edinet_test             edinet-postgresql:ci)
+          trap 'docker stop "$cid" >/dev/null 2>&1 || true' EXIT
+
+          for i in {1..30}; do
+            if docker exec "$cid" pg_isready -U postgres -d edinet_test >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+
+          docker exec "$cid" pg_isready -U postgres -d edinet_test
+          docker exec "$cid" psql -v ON_ERROR_STOP=1 -U postgres -d edinet_test -c 'CREATE EXTENSION IF NOT EXISTS postgis;'
+          docker exec "$cid" psql -v ON_ERROR_STOP=1 -U postgres -d edinet_test -c 'CREATE EXTENSION IF NOT EXISTS pg_trgm;'
+          docker exec "$cid" psql -At -U postgres -d edinet_test -c "SELECT extname FROM pg_extension WHERE extname IN ('postgis','pg_trgm') ORDER BY extname;"             | grep -Fx postgis
+          docker exec "$cid" psql -At -U postgres -d edinet_test -c "SELECT extname FROM pg_extension WHERE extname IN ('postgis','pg_trgm') ORDER BY extname;"             | grep -Fx pg_trgm
+
+      - name: Trivy vulnerability gate
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: edinet-postgresql:ci
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          vuln-type: os,library
+          exit-code: '1'
+
+  publish:
+    if: github.event_name == 'push'
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      # 设置镜像标签
-      - name: Set up Docker tags
-        id: docker_meta
-        uses: docker/metadata-action@v4
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
-          images: hsxk/edinet-postgresql
+          images: ${{ env.IMAGE }}
           tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=ref,event=tag
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=sha
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=sha
-            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'main') || startsWith(github.ref, 'refs/tags/') }}
 
-      # 构建单平台镜像用于扫描（不推送）
-      - name: Build local image for scanning
-        uses: docker/build-push-action@v3
-        with:
-          context: .
-          file: Dockerfile
-          push: false
-          load: true
-          tags: edinet-postgresql:scan-${{ github.sha }}
-          cache-from: type=local,src=/tmp/.buildx-cache
-          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
-
-      # 安全扫描本地镜像
-      - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: edinet-postgresql:scan-${{ github.sha }}
-          format: 'table'
-          exit-code: '0'
-          ignore-unfixed: true
-          vuln-type: 'os,library'
-          severity: 'CRITICAL,HIGH'
-
-      # 构建并推送多平台镜像（只在非PR时推送）
-      - name: Build and push multi-platform Docker image
-        if: github.event_name != 'pull_request'
-        uses: docker/build-push-action@v3
+      - name: Build and push multi-arch image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: Dockerfile
           push: true
           platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.docker_meta.outputs.tags }}
-          labels: ${{ steps.docker_meta.outputs.labels }}
-          cache-from: |
-            type=local,src=/tmp/.buildx-cache
-            type=registry,ref=hsxk/edinet-postgresql:cache-linux-amd64
-            type=registry,ref=hsxk/edinet-postgresql:cache-linux-arm64
-          cache-to: |
-            type=registry,ref=hsxk/edinet-postgresql:cache-linux-amd64,mode=max
-            type=registry,ref=hsxk/edinet-postgresql:cache-linux-arm64,mode=max
-
-      # 移动缓存
-      - name: Move cache
-        run: |
-          rm -rf /tmp/.buildx-cache
-          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: mode=max
+          sbom: true

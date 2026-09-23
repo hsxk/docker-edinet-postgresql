@@ -1,113 +1,121 @@
-# EDINET Database
-This repository contains a Dockerfile to build an EDINET database service. The resulting image is based on PostgreSQL with PostGIS and pg_trgm extensions, designed for storing and processing financial data from the EDINET system (Electronic Disclosure for Investors' NETwork) in Japan.
+# EDINET PostgreSQL
 
-## Features
-- Based on latest PostgreSQL
-- Integrated PostGIS spatial data extension
-- Support for pg_trgm text search extension
-- Multi-architecture support: linux/amd64, linux/arm64
-- Automated database initialization
-- Optimized configuration for financial data storage
-## Build and Run
-To build the Docker image locally, use the following command:
+[![Docker Build](https://github.com/hsxk/docker-edinet-postgresql/actions/workflows/docker-build.yml/badge.svg?branch=main)](https://github.com/hsxk/docker-edinet-postgresql/actions/workflows/docker-build.yml)
+[![Docker Pulls](https://img.shields.io/docker/pulls/hsxk/edinet-postgresql)](https://hub.docker.com/r/hsxk/edinet-postgresql)
+[![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](./LICENSE)
 
-sh
+A PostgreSQL 17 image for EDINET-oriented data workloads with PostGIS installed
+and PostgreSQL's built-in `pg_trgm` extension available.
 
-运行
+Published image: [`hsxk/edinet-postgresql`](https://hub.docker.com/r/hsxk/edinet-postgresql)
 
-Open Folder
+## What is included
 
-1
+- PostgreSQL 17
+- PostGIS 3 packages for PostgreSQL 17
+- `pg_trgm` support from PostgreSQL contrib
+- `linux/amd64` and `linux/arm64` published images
+- CI validation that boots PostgreSQL and creates both `postgis` and
+  `pg_trgm` before an image is published
+- Trivy HIGH/CRITICAL vulnerability gate
+- SBOM and provenance on published multi-arch images
 
-docker build -t edinet-db .
+The image **installs** PostGIS, but it does not automatically enable extensions
+inside every database. Enable the extensions in each database that needs them:
 
-To run the container based on the built image, use the following command:
+```sql
+CREATE EXTENSION IF NOT EXISTS postgis;
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+```
 
-sh
+## Pull and run
 
-运行
+```sh
+docker pull hsxk/edinet-postgresql:latest
 
-Open Folder
+docker run -d \
+  --name edinet-postgresql \
+  -e POSTGRES_PASSWORD=change-me \
+  -e POSTGRES_DB=edinet \
+  -p 5432:5432 \
+  -v edinet_postgres_data:/var/lib/postgresql/data \
+  hsxk/edinet-postgresql:latest
+```
 
-1
+For production, pin an explicit version/digest from Docker Hub instead of
+depending indefinitely on the moving `latest` tag.
 
-docker run -d --name
+## Build locally
 
-edinet-db-service -e
+```sh
+docker build -t edinet-postgresql:local .
+```
 
-POSTGRES_PASSWORD=your_password -p
+Then verify the extensions:
 
-5432:5432 hsxk/edinet-db
+```sh
+docker run -d --rm \
+  --name edinet-postgresql-test \
+  -e POSTGRES_PASSWORD=test-password \
+  -e POSTGRES_DB=edinet_test \
+  edinet-postgresql:local
 
-You can also pull the pre-built image directly from Docker Hub:
+docker exec edinet-postgresql-test \
+  psql -U postgres -d edinet_test -c 'CREATE EXTENSION postgis;'
 
-sh
+docker exec edinet-postgresql-test \
+  psql -U postgres -d edinet_test -c 'CREATE EXTENSION pg_trgm;'
+```
 
-运行
+## Environment variables
 
-Open Folder
+This image inherits the standard PostgreSQL Docker image configuration,
+including:
 
-1
+- `POSTGRES_PASSWORD` — required unless another supported authentication
+  strategy is intentionally configured
+- `POSTGRES_USER` — defaults to `postgres`
+- `POSTGRES_DB` — defaults to the value of `POSTGRES_USER`
+- `PGDATA` — PostgreSQL data directory
 
-2
+Refer to the official PostgreSQL image documentation for the complete
+initialization contract.
 
-docker pull hsxk/edinet-db
+## Persistence
 
-docker run -d --name
+Mount a named volume or durable host path at:
 
-edinet-db-service -e
+```text
+/var/lib/postgresql/data
+```
 
-POSTGRES_PASSWORD=your_password -p
+Example:
 
-5432:5432 hsxk/edinet-db
+```sh
+docker volume create edinet_postgres_data
+```
 
-## Configuration
-The container is configured with:
+Do not expose PostgreSQL directly to the public internet unless you have a
+deliberate network and authentication design.
 
-- PostGIS extension for geospatial data processing
-- pg_trgm extension for text similarity search and indexing
-- Automatic initialization scripts to ensure extensions are available in all databases
-- Optimized parameters for financial data processing
-## Environment Variables
-You can customize the database configuration with the following environment variables:
+## CI and releases
 
-- POSTGRES_PASSWORD : (Required) PostgreSQL superuser password
-- POSTGRES_USER : (Optional) PostgreSQL superuser name (default: postgres)
-- POSTGRES_DB : (Optional) Default database name (default: postgres)
-- PGDATA : (Optional) Data directory location (default: /var/lib/postgresql/data)
-## Data Persistence
-To ensure data persistence, it's recommended to mount a volume to the container's data directory:
+Pull requests and `main` pushes build and boot-test the image. CI verifies
+that PostgreSQL accepts connections and that both PostGIS and `pg_trgm` can be
+created successfully. Trivy fails the build on fixable HIGH/CRITICAL findings.
 
-sh
+A successful push to `main` publishes `latest` plus a commit-SHA tag. A
+version tag such as `v17.1.0` publishes semver tags. Published images are
+multi-architecture and include provenance and SBOM attestations.
 
-运行
+GitHub Actions are pinned to immutable commit SHAs; Dependabot checks those pins
+weekly.
 
-Open Folder
+## Contributing and security
 
-1
-
-2
-
-3
-
-4
-
-docker run -d --name
-
-edinet-db-service \
-
--e
-
-POSTGRES_PASSWORD=your_password \
-
--v edinet_db_data:/var/lib/
-
-postgresql/data \
-
--p 5432:5432 hsxk/edinet-db
-
-## Contributing
-If you have any suggestions, improvements, or issues, feel free to create an issue or pull request in the GitHub repository.
+See [CONTRIBUTING.md](./CONTRIBUTING.md) before proposing changes and
+[SECURITY.md](./SECURITY.md) before reporting a vulnerability.
 
 ## License
-This project is licensed under the GPLv3 License.
+
+GPL-3.0. See [LICENSE](./LICENSE).
